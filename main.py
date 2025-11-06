@@ -38,7 +38,7 @@ for d in DIRS.values():
 
 # Serve static files
 app.mount("/files", StaticFiles(directory=BASE_PATH), name="files")
-PUBLIC_URL = os.getenv("BASE_URL")
+PUBLIC_URL = os.getenv("BASE_URL", "http://localhost:8088/files").strip()
 
 class UploadResponse(BaseModel):
     url: str = None
@@ -46,6 +46,11 @@ class UploadResponse(BaseModel):
     image_url_medium: str = None
     image_url_original: str = None
     image_url_placeholder: str = None
+
+
+@app.get("/envtest")
+async def tester():
+    return {"message": PUBLIC_URL}
 
 @app.get("/health")
 async def health():

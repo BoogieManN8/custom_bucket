@@ -1,21 +1,27 @@
 #!/bin/bash
 # setup-assets-bucket.sh
-# Full auto-setup: Docker check → install → build → run → test
+# Full auto-setup with robust error handling & no path breaks
 # Run: curl -fsSL https://raw.githubusercontent.com/your-repo/setup-assets-bucket.sh | bash
 
-set -e
+set -euo pipefail
 
+# === 1. Define project dir early ===
 PROJECT_DIR="$(pwd)/custom_bucket"
 LOG_FILE="$PROJECT_DIR/setup.log"
 
+# === 2. Ensure project dir exists BEFORE logging ===
+mkdir -p "$PROJECT_DIR"
+cd "$PROJECT_DIR"
+
+# === 3. Now safe to use tee ===
 echo "Starting auto-setup for Assets Bucket..." | tee "$LOG_FILE"
 
-# === 1. Check & install Docker ===
+# === 4. Check & install Docker ===
 if ! command -v docker &> /dev/null; then
     echo "Docker not found. Installing..." | tee -a "$LOG_FILE"
     curl -fsSL https://get.docker.com | sh
-    sudo systemctl start docker
-    sudo systemctl enable docker
+    sudo systemctl start docker 2>/dev/null || true
+    sudo systemctl enable docker 2>/dev/null || true
 else
     echo "Docker already installed." | tee -a "$LOG_FILE"
 fi
@@ -28,14 +34,10 @@ else
     echo "docker-compose already installed." | tee -a "$LOG_FILE"
 fi
 
-# === 2. Create project dir ===
-mkdir -p "$PROJECT_DIR"
-cd "$PROJECT_DIR"
-
-# === 3. Generate secure token ===
+# === 5. Generate secure token ===
 SECRET_TOKEN=$(openssl rand -hex 32)
 
-# === 4. Write .env ===
+# === 6. Write .env ===
 cat > .env << EOF
 SECRET_TOKEN=$SECRET_TOKEN
 BASE_PATH=/app/storage
@@ -43,7 +45,7 @@ CLAMAV_ENABLED=true
 BASE_URL=http://localhost:8088/files
 EOF
 
-# === 5. Write requirements.txt ===
+# === 7. Write requirements.txt ===
 cat > requirements.txt << 'EOF'
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
@@ -54,7 +56,7 @@ python-magic==0.4.27
 aiofiles==24.1.0
 EOF
 
-# === 6. Write Dockerfile ===
+# === 8. Write Dockerfile ===
 cat > Dockerfile << 'EOF'
 FROM python:3.12-slim
 
@@ -71,7 +73,7 @@ EXPOSE 8088
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8088"]
 EOF
 
-# === 7. Write docker-compose.yml ===
+# === 9. Write docker-compose.yml ===
 cat > docker-compose.yml << 'EOF'
 services:
   assets-bucket:
@@ -100,7 +102,7 @@ volumes:
   clamav-data:
 EOF
 
-# === 8. Write main.py (final working version) ===
+# === 10. Write main.py ===
 cat > main.py << 'EOF'
 import os
 import uuid
@@ -188,19 +190,15 @@ def generate_image_variants(file_path: str, filename: str) -> dict:
     urls = {}
     with Image.open(file_path) as img:
         fmt = img.format or "JPEG"
-        # original
         p = os.path.join(DIRS["image"], "original", f"{base}{ext}")
         img.save(p, format=fmt)
         urls["image_url_original"] = f"{PUBLIC_URL}/images/original/{base}{ext}"
-        # small
         s = img.copy(); s.thumbnail((320,320))
         s.save(os.path.join(DIRS["image"], "small", f"{base}{ext}"), format=fmt)
         urls["image_url_small"] = f"{PUBLIC_URL}/images/small/{base}{ext}"
-        # medium
         m = img.copy(); m.thumbnail((800,800))
         m.save(os.path.join(DIRS["image"], "medium", f"{base}{ext}"), format=fmt)
         urls["image_url_medium"] = f"{PUBLIC_URL}/images/medium/{base}{ext}"
-        # placeholder
         ph = img.copy(); ph.thumbnail((20,20))
         ph = ph.filter(ImageFilter.GaussianBlur(2))
         ph.save(os.path.join(DIRS["image"], "placeholder", f"{base}{ext}"), format=fmt)
@@ -229,19 +227,19 @@ async def upload_file(file: UploadFile = File(...), token: str = Header(..., ali
         return JSONResponse({"url": f"{PUBLIC_URL}/{cat}/{name}"})
 EOF
 
-# === 9. Build & run ===
+# === 11. Build & run ===
 echo "Building and starting containers..." | tee -a "$LOG_FILE"
 docker-compose down -v &> /dev/null || true
 docker-compose up -d --build
 
-# === 10. Wait & test health ===
+# === 12. Wait & test health ===
 echo "Waiting for service..." | tee -a "$LOG_FILE"
 for i in {1..30}; do
     if curl -s http://localhost:8088/health &> /dev/null; then
         echo "SUCCESS: Assets Bucket is running!" | tee -a "$LOG_FILE"
-        echo "Upload test command:"
-        echo "curl -X POST http://localhost:8088/upload -H 'X-Secret-Token: $SECRET_TOKEN' -F 'file=@./test.pdf'"
-        echo "Files: http://localhost:8088/files/"
+        echo "Upload test command:" | tee -a "$LOG_FILE"
+        echo "curl -X POST http://localhost:8088/upload -H 'X-Secret-Token: $SECRET_TOKEN' -F 'file=@./test.pdf'" | tee -a "$LOG_FILE"
+        echo "Files: http://localhost:8088/files/" | tee -a "$LOG_FILE"
         exit 0
     fi
     sleep 2

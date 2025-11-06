@@ -38,7 +38,7 @@ for d in DIRS.values():
 
 # Serve static files
 app.mount("/files", StaticFiles(directory=BASE_PATH), name="files")
-PUBLIC_URL = "http://localhost:8088/files"
+PUBLIC_URL = os.getenv("BASE_URL")
 
 class UploadResponse(BaseModel):
     url: str = None

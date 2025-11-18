@@ -1,0 +1,25 @@
+services:
+  assets-bucket:
+    build: .
+    container_name: fastapi-assets-bucket
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./storage:/app/storage
+      - ./uploads:/app/uploads
+      - .:/app
+    env_file: .env
+    command: uvicorn main:app --host 0.0.0.0 --port 8088 --reload
+    depends_on:
+      - clamav
+
+  clamav:
+    image: mkodockx/docker-clamav:alpine
+    container_name: clamav
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav-data:/var/lib/clamav
+
+volumes:
+  clamav-data:

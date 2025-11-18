@@ -1,24 +1,26 @@
 FROM python:3.12-slim
 
+# System dependencies (you already had most of these — kept only the actually needed ones)
 RUN apt-get update && apt-get install -y \
     build-essential \
-    cargo \
+    pkg-config \
+    libmagic1 \
     ffmpeg \
+    poppler-utils \
     ghostscript \
     imagemagick \
-    libffi-dev \
     libimage-exiftool-perl \
-    libmagic1 \
-    libssl-dev \
-    pkg-config \
-    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
+# Copy only requirements first (better layer caching)
 COPY requirements.txt .
+
+# Install Python packages
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy source code
 COPY . .
 
 EXPOSE 8088

@@ -1,11 +1,16 @@
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    cargo \
     ffmpeg \
-    libmagic1 \
-    imagemagick \
-    libimage-exiftool-perl \
     ghostscript \
+    imagemagick \
+    libffi-dev \
+    libimage-exiftool-perl \
+    libmagic1 \
+    libssl-dev \
+    pkg-config \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 

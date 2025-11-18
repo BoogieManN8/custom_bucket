@@ -10,10 +10,17 @@ services:
       - .:/app  # Hot reload: sync local code into container
     env_file:
       - .env
+    environment:
+      DB_HOST: media-db
+      DB_PORT: 3306
+      DB_NAME: assets_bucket
+      DB_USER: asset_user
+      DB_PASSWORD: asset_pass
     command: uvicorn main:app --host 0.0.0.0 --port 8088 --reload  # Auto-restart on code change
     restart: unless-stopped
     depends_on:
       - clamav
+      - media-db
 
   clamav:
     image: mkodockx/docker-clamav:alpine
@@ -24,5 +31,21 @@ services:
       - clamav-data:/var/lib/clamav
     restart: unless-stopped
 
+  media-db:
+    image: mysql:8.4
+    container_name: media-mysql
+    restart: unless-stopped
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_DATABASE: assets_bucket
+      MYSQL_USER: asset_user
+      MYSQL_PASSWORD: asset_pass
+      MYSQL_ROOT_PASSWORD: root_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+
 volumes:
   clamav-data:
+  mysql-data:

@@ -26,12 +26,19 @@ class VariantConfig(TypedDict, total=False):
     quality: int | None
 
 
+class VariantInfo(TypedDict):
+    path: str
+    size: int
+    width: int
+    height: int
+
+
 class VariantPayload(TypedDict):
     base_name: str
     extension: str
-    width: int
-    height: int
-    urls: Dict[str, str]
+    width: int  # Original width
+    height: int  # Original height
+    variants: Dict[str, VariantInfo]  # Key: "image_high", "image_small", etc.
 
 
 VariantKey = Literal[
@@ -50,6 +57,9 @@ BASE_PATH = os.getenv("BASE_PATH", "/app/storage")
 UPLOAD_TEMP = "/app/uploads"
 SECRET_TOKEN = os.getenv("SECRET_TOKEN")
 PUBLIC_URL = os.getenv("BASE_URL", "http://localhost:8088/files").strip()
+CLAMAV_HOST = os.getenv("CLAMAV_HOST", "clamav")
+CLAMAV_PORT = int(os.getenv("CLAMAV_PORT", "3310"))
+CLAMAV_ENABLED = os.getenv("CLAMAV_ENABLED", "false").lower() == "true"
 
 IMAGE_SUBDIRECTORIES = ("small", "medium", "high", "original", "placeholder")
 IMAGE_VARIANT_SET = set(IMAGE_SUBDIRECTORIES)
@@ -123,27 +133,48 @@ def classify_file(mime_type: str, filename: str) -> str:
 
 
 async def scan_file_with_clamav(file_path: str) -> bool:
-    # ... (same as before)
-    return True  # simplified for brevity
+    """Scan file with ClamAV if enabled, otherwise allow upload."""
+    if not CLAMAV_ENABLED:
+        return True
+    
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect((CLAMAV_HOST, CLAMAV_PORT))
+        sock.send(b"zINSTREAM\0")
+        with open(file_path, "rb") as f:
+            while chunk := f.read(1024):
+                sock.send(len(chunk).to_bytes(4, "big") + chunk)
+        sock.send(b"\x00\x00\x00\x00")
+        response = sock.recv(4096)
+        sock.close()
+        return b"OK" in response
+    except Exception as exc:
+        logger.warning("ClamAV scan failed (upload allowed due to fallback): %s", exc)
+        return True
 
 
 def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
+    """Generate all image variants and return their actual dimensions and file sizes."""
     base_name = f"{uuid.uuid4()}"
     extension = os.path.splitext(filename)[1].lower()
     if not extension:
         extension = ".jpg"
     filename_with_ext = f"{base_name}{extension}"
-    urls: Dict[str, str] = {}
+    variants: Dict[str, VariantInfo] = {}
 
     with Image.open(file_path) as img:
         image_format = img.format or "JPEG"
-        width, height = img.size
+        original_width, original_height = img.size
 
         for variant_key, config in IMAGE_VARIANTS.items():
             variant_image = img.copy()
+            variant_width, variant_height = original_width, original_height
 
             if config.get("max_size"):
                 variant_image.thumbnail(config["max_size"], Image.Resampling.LANCZOS)
+                variant_width, variant_height = variant_image.size
 
             if config.get("blur_radius"):
                 variant_image = variant_image.filter(ImageFilter.GaussianBlur(config["blur_radius"]))
@@ -158,14 +189,25 @@ def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
                     save_kwargs["subsampling"] = 1
 
             variant_image.save(variant_path, **save_kwargs)
-            urls[variant_key] = f"{PUBLIC_URL}/images/{config['folder']}/{filename_with_ext}"
+            
+            # Get actual file size after saving
+            variant_file_size = os.path.getsize(variant_path)
+            
+            # Convert variant_key to response key (e.g., "image_url_high" -> "image_high")
+            response_key = variant_key.replace("image_url_", "image_")
+            variants[response_key] = {
+                "path": f"/files/images/{config['folder']}/{filename_with_ext}",
+                "size": variant_file_size,
+                "width": variant_width,
+                "height": variant_height,
+            }
 
     return {
         "base_name": base_name,
         "extension": extension.lstrip("."),
-        "width": width,
-        "height": height,
-        "urls": urls,
+        "width": original_width,
+        "height": original_height,
+        "variants": variants,
     }
 
 
@@ -175,12 +217,14 @@ async def persist_asset_metadata(
     file_size: int,
     variant_payload: VariantPayload,
 ) -> MediaAsset:
+    """Store asset metadata in the database."""
     uid = uuid.uuid4()
     width = variant_payload["width"]
     height = variant_payload["height"]
     aspect_ratio = width / height if height else None
     now = datetime.utcnow()
 
+    # Store variants info in responsive_images
     asset = MediaAsset(
         uid=uid.bytes,
         aspect_ratio=aspect_ratio,
@@ -197,7 +241,7 @@ async def persist_asset_metadata(
         status=0,
         manipulations=DEFAULT_MANIPULATIONS,
         custom_properties={"width": width, "height": height},
-        responsive_images=variant_payload["urls"],
+        responsive_images=variant_payload["variants"],
         created_at=now,
         updated_at=now,
     )
@@ -216,18 +260,38 @@ async def get_asset_by_base_name(base_name: str) -> MediaAsset | None:
         return result.scalar_one_or_none()
 
 
-def _build_properties_payload(asset: MediaAsset) -> Dict[str, object]:
-    uid_str = str(uuid.UUID(bytes=asset.uid))
-    raw = {col.name: getattr(asset, col.name) for col in asset.__table__.columns}
-    raw["uid"] = uid_str
-    return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in raw.items()}
-
-
 def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
-    props = _build_properties_payload(asset)
-    links = asset.responsive_images or {}
-    enriched = {key: {"url": url, "properties": props} for key, url in links.items()}
-    return {"asset": props, "links": enriched}
+    """Build the exact JSON structure as specified by the user."""
+    uid_str = str(uuid.UUID(bytes=asset.uid))
+    filename_with_ext = f"{asset.name}.{asset.extension}"
+    
+    # Get original path
+    original_path = f"/files/images/original/{filename_with_ext}"
+    
+    # Get responsive images with actual data
+    responsive_images = asset.responsive_images or {}
+    
+    # Build the exact structure
+    asset_payload = {
+        "uid": uid_str,
+        "original_name": asset.original_name,
+        "title": asset.title,
+        "name": asset.name,
+        "folder": asset.folder,
+        "mime_type": asset.mime_type,
+        "extension": asset.extension,
+        "disk": asset.disk,
+        "size": asset.size,
+        "status": asset.status,
+        "original": original_path,
+        "manipulations": asset.manipulations or DEFAULT_MANIPULATIONS,
+        "custom_properties": asset.custom_properties or {},
+        "responsive_images": responsive_images,
+        "created_at": asset.created_at.isoformat() if asset.created_at else None,
+        "updated_at": asset.updated_at.isoformat() if asset.updated_at else None,
+    }
+    
+    return {"asset": asset_payload}
 
 
 # ==================== ROUTES ====================

@@ -68,14 +68,14 @@ IMAGE_VARIANTS: Dict[VariantKey, VariantConfig] = {
     "image_url_original": {"folder": "original", "max_size": None},
     "image_url_small": {"folder": "small", "max_size": (320, 320)},
     "image_url_medium": {"folder": "medium", "max_size": (800, 800)},
-    "image_url_high": {"folder": "high", "max_size": None, "quality": 70},
+    "image_url_high": {"folder": "high", "max_size": (1600, 1600), "quality": 70},
     "image_url_placeholder": {"folder": "placeholder", "max_size": (20, 20), "blur_radius": 2},
 }
 
 DEFAULT_MANIPULATIONS = {
     "small": {"max_dimension": 320},
     "medium": {"max_dimension": 800},
-    "high": {"quality": 70},
+    "high": {"max_dimension": 1600},
     "placeholder": {"max_dimension": 20, "blur": 2},
 }
 
@@ -211,6 +211,144 @@ def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
     }
 
 
+def extract_file_metadata(file_path: str, mime_type: str, category: str) -> Dict[str, Any]:
+    """Extract metadata for non-image files (audio, video, pdf, etc.)."""
+    metadata: Dict[str, Any] = {}
+    
+    if category == "audio":
+        try:
+            # Try to extract audio metadata using ffprobe if available
+            import subprocess
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                import json
+                probe_data = json.loads(result.stdout)
+                if "format" in probe_data:
+                    format_info = probe_data["format"]
+                    if "duration" in format_info:
+                        metadata["duration"] = float(format_info["duration"])
+                    if "bit_rate" in format_info:
+                        metadata["bitrate"] = int(format_info["bit_rate"])
+                if "streams" in probe_data and len(probe_data["streams"]) > 0:
+                    stream = probe_data["streams"][0]
+                    if "codec_name" in stream:
+                        metadata["codec"] = stream["codec_name"]
+                    if "sample_rate" in stream:
+                        metadata["sample_rate"] = int(stream["sample_rate"])
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, Exception) as e:
+            logger.debug("Could not extract audio metadata: %s", e)
+    
+    elif category == "video":
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                import json
+                probe_data = json.loads(result.stdout)
+                if "format" in probe_data:
+                    format_info = probe_data["format"]
+                    if "duration" in format_info:
+                        metadata["duration"] = float(format_info["duration"])
+                    if "bit_rate" in format_info:
+                        metadata["bitrate"] = int(format_info["bit_rate"])
+                if "streams" in probe_data:
+                    video_stream = next((s for s in probe_data["streams"] if s.get("codec_type") == "video"), None)
+                    if video_stream:
+                        if "width" in video_stream and "height" in video_stream:
+                            metadata["width"] = int(video_stream["width"])
+                            metadata["height"] = int(video_stream["height"])
+                        if "codec_name" in video_stream:
+                            metadata["codec"] = video_stream["codec_name"]
+                        if "r_frame_rate" in video_stream:
+                            metadata["frame_rate"] = video_stream["r_frame_rate"]
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, Exception) as e:
+            logger.debug("Could not extract video metadata: %s", e)
+    
+    elif category == "pdf":
+        try:
+            # Try to extract PDF metadata using pdfinfo if available
+            import subprocess
+            result = subprocess.run(
+                ["pdfinfo", file_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.split("\n"):
+                    if "Pages:" in line:
+                        try:
+                            metadata["pages"] = int(line.split(":")[1].strip())
+                        except (ValueError, IndexError):
+                            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            logger.debug("Could not extract PDF metadata: %s", e)
+    
+    return metadata
+
+
+async def persist_non_image_metadata(
+    original_name: str,
+    mime_type: str,
+    file_size: int,
+    category: str,
+    base_name: str,
+    extension: str,
+    file_path: str,
+) -> MediaAsset:
+    """Store metadata for non-image files in the database."""
+    uid = uuid.uuid4()
+    now = datetime.utcnow()
+    
+    # Extract additional metadata
+    custom_properties = extract_file_metadata(file_path, mime_type, category)
+    
+    # Build file path
+    file_url = f"/files/{category}/{base_name}.{extension}"
+    
+    asset = MediaAsset(
+        uid=uid.bytes,
+        aspect_ratio=None,
+        collection_name=None,
+        original_name=original_name,
+        title=None,
+        name=base_name,
+        model_type=category,
+        folder=category,
+        mime_type=mime_type,
+        extension=extension,
+        disk="local",
+        size=file_size,
+        status=0,
+        manipulations=None,
+        custom_properties=custom_properties,
+        responsive_images=None,
+        order_column=None,
+        created_by=None,
+        updated_by=None,
+        deleted_by=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    async with AsyncSessionLocal() as session:
+        session.add(asset)
+        await session.commit()
+        await session.refresh(asset)
+
+    return asset
+
+
 async def persist_asset_metadata(
     original_name: str,
     mime_type: str,
@@ -265,11 +403,15 @@ def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
     uid_str = str(uuid.UUID(bytes=asset.uid))
     filename_with_ext = f"{asset.name}.{asset.extension}"
     
-    # Get original path
-    original_path = f"/files/images/original/{filename_with_ext}"
-    
-    # Get responsive images with actual data
-    responsive_images = asset.responsive_images or {}
+    # Get original path based on file type
+    if asset.model_type == "image":
+        original_path = f"/files/images/original/{filename_with_ext}"
+        responsive_images = asset.responsive_images or {}
+        manipulations = asset.manipulations or DEFAULT_MANIPULATIONS
+    else:
+        original_path = f"/files/{asset.folder}/{filename_with_ext}"
+        responsive_images = None
+        manipulations = None
     
     # Build the exact structure
     asset_payload = {
@@ -284,7 +426,7 @@ def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
         "size": asset.size,
         "status": asset.status,
         "original": original_path,
-        "manipulations": asset.manipulations or DEFAULT_MANIPULATIONS,
+        "manipulations": manipulations,
         "custom_properties": asset.custom_properties or {},
         "responsive_images": responsive_images,
         "created_at": asset.created_at.isoformat() if asset.created_at else None,
@@ -319,14 +461,39 @@ async def upload_file(
         variant_payload = await asyncio.to_thread(generate_image_variants, temp_path, file.filename or "image")
         _remove_file_if_exists(temp_path)
         asset = await persist_asset_metadata(file.filename or "unknown", mime_type, file_size, variant_payload)
-
-        # Return full info + all URLs
         return JSONResponse(build_asset_payload(asset))
     else:
-        unique_name = f"{uuid.uuid4()}{os.path.splitext(file.filename or '')[1]}"
+        # Handle non-image files (audio, video, pdf, etc.)
+        file_size = os.path.getsize(temp_path)
+        extension = os.path.splitext(file.filename or "file")[1].lstrip(".")
+        if not extension:
+            # Try to guess extension from mime type
+            if mime_type == "application/pdf":
+                extension = "pdf"
+            elif mime_type.startswith("audio/"):
+                extension = "mp3"  # default
+            elif mime_type.startswith("video/"):
+                extension = "mp4"  # default
+        
+        base_name = f"{uuid.uuid4()}"
+        unique_name = f"{base_name}.{extension}"
         final_path = os.path.join(DIRS[category], unique_name)
+        
+        # Move file first, then extract metadata (some tools need the file in place)
         shutil.move(temp_path, final_path)
-        return JSONResponse({"url": f"{PUBLIC_URL}/{category}/{unique_name}"})
+        
+        # Persist metadata
+        asset = await persist_non_image_metadata(
+            original_name=file.filename or "unknown",
+            mime_type=mime_type,
+            file_size=file_size,
+            category=category,
+            base_name=base_name,
+            extension=extension,
+            file_path=final_path,
+        )
+        
+        return JSONResponse(build_asset_payload(asset))
 
 
 # NEW: Clean endpoint to get full asset info

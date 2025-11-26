@@ -398,6 +398,42 @@ async def get_asset_by_base_name(base_name: str) -> MediaAsset | None:
         return result.scalar_one_or_none()
 
 
+async def get_asset_by_uid(uid_str: str) -> MediaAsset | None:
+    """Get asset by UID string."""
+    try:
+        uid_bytes = uuid.UUID(uid_str).bytes
+    except ValueError:
+        return None
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(MediaAsset).where(MediaAsset.uid == uid_bytes))
+        return result.scalar_one_or_none()
+
+
+def delete_asset_files(asset: MediaAsset) -> None:
+    """Delete all physical files associated with an asset."""
+    filename_with_ext = f"{asset.name}.{asset.extension}"
+    
+    if asset.model_type == "image":
+        # Delete all image variants
+        for variant_folder in IMAGE_SUBDIRECTORIES:
+            variant_path = os.path.join(DIRS["image"], variant_folder, filename_with_ext)
+            if os.path.exists(variant_path):
+                os.remove(variant_path)
+    else:
+        # Delete single file for non-image assets
+        file_path = os.path.join(DIRS[asset.folder], filename_with_ext)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+async def delete_asset_from_db(asset: MediaAsset) -> None:
+    """Delete asset record from database."""
+    async with AsyncSessionLocal() as session:
+        await session.delete(asset)
+        await session.commit()
+
+
 def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
     """Build the exact JSON structure as specified by the user."""
     uid_str = str(uuid.UUID(bytes=asset.uid))
@@ -523,6 +559,50 @@ async def serve_image_file(variant: str, filename: str):
     media_type = asset.mime_type if asset else "application/octet-stream"
 
     return FileResponse(file_path, media_type=media_type)
+
+
+@app.delete("/delete/name/{base_name}")
+async def delete_asset_by_name(
+    base_name: str,
+    token: str = Header(..., alias="X-Secret-Token"),
+):
+    """Delete asset by base name (without extension)."""
+    if token != SECRET_TOKEN:
+        raise HTTPException(401, "Invalid token")
+    
+    asset = await get_asset_by_base_name(base_name)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    
+    # Delete physical files
+    delete_asset_files(asset)
+    
+    # Delete from database
+    await delete_asset_from_db(asset)
+    
+    return JSONResponse({"status": "deleted", "name": base_name})
+
+
+@app.delete("/delete/uid/{uid}")
+async def delete_asset_by_uid(
+    uid: str,
+    token: str = Header(..., alias="X-Secret-Token"),
+):
+    """Delete asset by UID."""
+    if token != SECRET_TOKEN:
+        raise HTTPException(401, "Invalid token")
+    
+    asset = await get_asset_by_uid(uid)
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    
+    # Delete physical files
+    delete_asset_files(asset)
+    
+    # Delete from database
+    await delete_asset_from_db(asset)
+    
+    return JSONResponse({"status": "deleted", "uid": uid})
 
 
 # Health & test

@@ -425,7 +425,7 @@ def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
         "disk": asset.disk,
         "size": asset.size,
         "status": asset.status,
-        "original": original_path,
+        "original_image": original_path,
         "manipulations": manipulations,
         "custom_properties": asset.custom_properties or {},
         "responsive_images": responsive_images,

@@ -1,8 +1,48 @@
-__pycache__
-*.pyc
+# Git
 .git
 .gitignore
-README.md
-.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# Storage (don't copy uploaded files into image)
 storage/
 uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+setup.log
+
+# Scripts (not needed in container)
+setup.sh
+creator.sh
+test.pdf
+
+# MySQL init (mounted as volume)
+mysql-init/
+
+# Docker
+docker-compose.yml
+.dockerignore

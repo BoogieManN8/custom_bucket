@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 
 def _build_database_url() -> str:
     """Assemble the SQLAlchemy DSN using asyncmy driver (fast, pure-Python, fully supported)."""
-    default_url = "mysql+asyncmy://asset_user:asset_pass@db:3306/assets_bucket"
+    default_url = "mysql+asyncmy://asset_user:asset_pass@media-db:3306/assets_bucket"
     env_url = os.getenv("DATABASE_URL")
     if env_url:
         return env_url
 
     user = os.getenv("DB_USER", "asset_user")
     password = os.getenv("DB_PASSWORD", "asset_pass")
-    host = os.getenv("DB_HOST", "db")
+    host = os.getenv("DB_HOST", "media-db")
     port = os.getenv("DB_PORT", "3306")
     name = os.getenv("DB_NAME", "assets_bucket")
     return f"mysql+asyncmy://{user}:{password}@{host}:{port}/{name}"

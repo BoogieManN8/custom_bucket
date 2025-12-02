@@ -337,6 +337,7 @@ async def persist_non_image_metadata(
         created_by=None,
         updated_by=None,
         deleted_by=None,
+        is_paragraph=None,
         created_at=now,
         updated_at=now,
     )
@@ -380,6 +381,7 @@ async def persist_asset_metadata(
         manipulations=DEFAULT_MANIPULATIONS,
         custom_properties={"width": width, "height": height},
         responsive_images=variant_payload["variants"],
+        is_paragraph=None,
         created_at=now,
         updated_at=now,
     )
@@ -417,14 +419,31 @@ def delete_asset_files(asset: MediaAsset) -> None:
     if asset.model_type == "image":
         # Delete all image variants
         for variant_folder in IMAGE_SUBDIRECTORIES:
+            # Standard variant path
             variant_path = os.path.join(DIRS["image"], variant_folder, filename_with_ext)
             if os.path.exists(variant_path):
-                os.remove(variant_path)
+                try:
+                    os.remove(variant_path)
+                except OSError as e:
+                    logger.warning("Failed to delete file %s: %s", variant_path, e)
+            
+            # High variant might have .jpg extension
+            if variant_folder == "high":
+                high_filename = f"{asset.name}.jpg"
+                high_path = os.path.join(DIRS["image"], variant_folder, high_filename)
+                if os.path.exists(high_path):
+                    try:
+                        os.remove(high_path)
+                    except OSError as e:
+                        logger.warning("Failed to delete file %s: %s", high_path, e)
     else:
         # Delete single file for non-image assets
         file_path = os.path.join(DIRS[asset.folder], filename_with_ext)
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                logger.warning("Failed to delete file %s: %s", file_path, e)
 
 
 async def delete_asset_from_db(asset: MediaAsset) -> None:
@@ -461,10 +480,11 @@ def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
         "disk": asset.disk,
         "size": asset.size,
         "status": asset.status,
-        "original_image": original_path,
+        "original": original_path,
         "manipulations": manipulations,
         "custom_properties": asset.custom_properties or {},
         "responsive_images": responsive_images,
+        "is_paragraph": asset.is_paragraph,
         "created_at": asset.created_at.isoformat() if asset.created_at else None,
         "updated_at": asset.updated_at.isoformat() if asset.updated_at else None,
     }
@@ -557,6 +577,13 @@ async def serve_image_file(variant: str, filename: str):
     base_name, _ = os.path.splitext(filename)
     asset = await get_asset_by_base_name(base_name)
     media_type = asset.mime_type if asset else "application/octet-stream"
+    
+    # Handle high variant which might be .jpg
+    if variant == "high" and not os.path.exists(file_path):
+        high_filename = f"{base_name}.jpg"
+        file_path = os.path.join(DIRS["image"], variant, high_filename)
+        if not os.path.exists(file_path):
+            raise HTTPException(404, "File not found")
 
     return FileResponse(file_path, media_type=media_type)
 

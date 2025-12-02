@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict
 
-from sqlalchemy import BigInteger, Float, Integer, JSON, SmallInteger, String, func
+from sqlalchemy import BigInteger, Boolean, Float, Integer, JSON, SmallInteger, String, func
 from sqlalchemy.dialects.mysql import TIMESTAMP as MYSQL_TIMESTAMP, VARBINARY
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -78,6 +78,7 @@ class MediaAsset(Base):
         MYSQL_TIMESTAMP(fsp=6), server_default=func.now(), onupdate=func.now()
     )
     deleted_at: Mapped[datetime | None] = mapped_column(MYSQL_TIMESTAMP(fsp=6))
+    is_paragraph: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
 
 
 async def init_db(retries: int = 10, delay_seconds: float = 3.0) -> None:

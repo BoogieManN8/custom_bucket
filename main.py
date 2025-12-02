@@ -8,7 +8,7 @@ from typing import Any, Dict, Literal, TypedDict
 
 import aiofiles
 import magic
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Path
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, Path
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageFilter
@@ -97,6 +97,40 @@ def _ensure_directories() -> None:
                 os.makedirs(os.path.join(path, sub_dir), exist_ok=True)
 
 
+def _normalize_folder_path(folder: str | None) -> str | None:
+    """Normalize folder path: remove leading/trailing slashes, handle empty strings."""
+    if not folder or not folder.strip():
+        return None
+    # Remove leading and trailing slashes, normalize path separators
+    normalized = folder.strip().strip("/").strip("\\")
+    if not normalized:
+        return None
+    # Replace backslashes with forward slashes for consistency
+    normalized = normalized.replace("\\", "/")
+    # Remove any double slashes
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    return normalized
+
+
+def _get_folder_storage_path(base_dir: str, folder: str | None) -> str:
+    """Get the full storage path including folder subdirectory."""
+    if folder:
+        return os.path.join(base_dir, folder)
+    return base_dir
+
+
+def _ensure_folder_directories(category: str, folder: str | None) -> None:
+    """Ensure all necessary directories exist for a given category and folder."""
+    base_dir = DIRS[category]
+    folder_path = _get_folder_storage_path(base_dir, folder)
+    os.makedirs(folder_path, exist_ok=True)
+    
+    if category == "image":
+        for sub_dir in IMAGE_SUBDIRECTORIES:
+            os.makedirs(os.path.join(folder_path, sub_dir), exist_ok=True)
+
+
 _ensure_directories()
 
 
@@ -155,7 +189,7 @@ async def scan_file_with_clamav(file_path: str) -> bool:
         return True
 
 
-def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
+def generate_image_variants(file_path: str, filename: str, folder: str | None = None) -> VariantPayload:
     """Generate all image variants and return their actual dimensions and file sizes."""
     base_name = f"{uuid.uuid4()}"
     extension = os.path.splitext(filename)[1].lower()
@@ -163,6 +197,17 @@ def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
         extension = ".jpg"
     filename_with_ext = f"{base_name}{extension}"
     variants: Dict[str, VariantInfo] = {}
+    
+    # Ensure folder directories exist
+    _ensure_folder_directories("image", folder)
+    
+    # Build base path with folder
+    base_image_dir = _get_folder_storage_path(DIRS["image"], folder)
+    
+    # Build path prefix for responses
+    path_prefix = f"/files/images"
+    if folder:
+        path_prefix = f"{path_prefix}/{folder}"
 
     with Image.open(file_path) as img:
         image_format = img.format or "JPEG"
@@ -179,7 +224,7 @@ def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
             if config.get("blur_radius"):
                 variant_image = variant_image.filter(ImageFilter.GaussianBlur(config["blur_radius"]))
 
-            variant_path = os.path.join(DIRS["image"], config["folder"], filename_with_ext)
+            variant_path = os.path.join(base_image_dir, config["folder"], filename_with_ext)
 
             save_kwargs: Dict[str, Any] = {"format": image_format}
             if config.get("quality") is not None:
@@ -196,7 +241,7 @@ def generate_image_variants(file_path: str, filename: str) -> VariantPayload:
             # Convert variant_key to response key (e.g., "image_url_high" -> "image_high")
             response_key = variant_key.replace("image_url_", "image_")
             variants[response_key] = {
-                "path": f"/files/images/{config['folder']}/{filename_with_ext}",
+                "path": f"{path_prefix}/{config['folder']}/{filename_with_ext}",
                 "size": variant_file_size,
                 "width": variant_width,
                 "height": variant_height,
@@ -305,6 +350,7 @@ async def persist_non_image_metadata(
     base_name: str,
     extension: str,
     file_path: str,
+    folder: str | None = None,
 ) -> MediaAsset:
     """Store metadata for non-image files in the database."""
     uid = uuid.uuid4()
@@ -313,8 +359,10 @@ async def persist_non_image_metadata(
     # Extract additional metadata
     custom_properties = extract_file_metadata(file_path, mime_type, category)
     
-    # Build file path
-    file_url = f"/files/{category}/{base_name}.{extension}"
+    # Build folder path: category or "category/folder/subfolder"
+    folder_path = category
+    if folder:
+        folder_path = f"{category}/{folder}"
     
     asset = MediaAsset(
         uid=uid.bytes,
@@ -324,7 +372,7 @@ async def persist_non_image_metadata(
         title=None,
         name=base_name,
         model_type=category,
-        folder=category,
+        folder=folder_path,
         mime_type=mime_type,
         extension=extension,
         disk="local",
@@ -355,6 +403,7 @@ async def persist_asset_metadata(
     mime_type: str,
     file_size: int,
     variant_payload: VariantPayload,
+    folder: str | None = None,
 ) -> MediaAsset:
     """Store asset metadata in the database."""
     uid = uuid.uuid4()
@@ -362,6 +411,11 @@ async def persist_asset_metadata(
     height = variant_payload["height"]
     aspect_ratio = width / height if height else None
     now = datetime.utcnow()
+    
+    # Build folder path: "images" or "images/folder/subfolder"
+    folder_path = "images"
+    if folder:
+        folder_path = f"images/{folder}"
 
     # Store variants info in responsive_images
     asset = MediaAsset(
@@ -372,7 +426,7 @@ async def persist_asset_metadata(
         title=None,
         name=variant_payload["base_name"],
         model_type="image",
-        folder="images",
+        folder=folder_path,
         mime_type=mime_type,
         extension=variant_payload["extension"],
         disk="local",
@@ -417,10 +471,20 @@ def delete_asset_files(asset: MediaAsset) -> None:
     filename_with_ext = f"{asset.name}.{asset.extension}"
     
     if asset.model_type == "image":
+        # Parse folder from asset.folder (format: "images" or "images/folder/subfolder")
+        folder = None
+        if asset.folder and asset.folder.startswith("images/"):
+            folder_part = asset.folder[7:]  # Remove "images/" prefix
+            if folder_part:
+                folder = folder_part
+        
+        # Build base path with folder
+        base_image_dir = _get_folder_storage_path(DIRS["image"], folder)
+        
         # Delete all image variants
         for variant_folder in IMAGE_SUBDIRECTORIES:
             # Standard variant path
-            variant_path = os.path.join(DIRS["image"], variant_folder, filename_with_ext)
+            variant_path = os.path.join(base_image_dir, variant_folder, filename_with_ext)
             if os.path.exists(variant_path):
                 try:
                     os.remove(variant_path)
@@ -430,15 +494,24 @@ def delete_asset_files(asset: MediaAsset) -> None:
             # High variant might have .jpg extension
             if variant_folder == "high":
                 high_filename = f"{asset.name}.jpg"
-                high_path = os.path.join(DIRS["image"], variant_folder, high_filename)
+                high_path = os.path.join(base_image_dir, variant_folder, high_filename)
                 if os.path.exists(high_path):
                     try:
                         os.remove(high_path)
                     except OSError as e:
                         logger.warning("Failed to delete file %s: %s", high_path, e)
     else:
-        # Delete single file for non-image assets
-        file_path = os.path.join(DIRS[asset.folder], filename_with_ext)
+        # Parse folder from asset.folder (format: "category" or "category/folder/subfolder")
+        folder = None
+        category = asset.model_type or "unknown"
+        if asset.folder and asset.folder.startswith(f"{category}/"):
+            folder_part = asset.folder[len(category) + 1:]  # Remove "category/" prefix
+            if folder_part:
+                folder = folder_part
+        
+        # Build path with folder
+        base_dir = DIRS.get(category, DIRS["image"])  # fallback to image if unknown
+        file_path = os.path.join(_get_folder_storage_path(base_dir, folder), filename_with_ext)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -460,7 +533,17 @@ def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
     
     # Get original path based on file type
     if asset.model_type == "image":
-        original_path = f"/files/images/original/{filename_with_ext}"
+        # Parse folder from asset.folder (format: "images" or "images/folder/subfolder")
+        folder = None
+        if asset.folder and asset.folder.startswith("images/"):
+            folder_part = asset.folder[7:]  # Remove "images/" prefix
+            if folder_part:
+                folder = folder_part
+        
+        path_prefix = "/files/images"
+        if folder:
+            path_prefix = f"{path_prefix}/{folder}"
+        original_path = f"{path_prefix}/original/{filename_with_ext}"
         responsive_images = asset.responsive_images or {}
         manipulations = asset.manipulations or DEFAULT_MANIPULATIONS
     else:
@@ -498,9 +581,14 @@ def build_asset_payload(asset: MediaAsset) -> Dict[str, object]:
 async def upload_file(
     file: UploadFile = File(...),
     token: str = Header(..., alias="X-Secret-Token"),
+    folder: str | None = Form(None),
 ):
+    """Upload a file with optional folder organization."""
     if token != SECRET_TOKEN:
         raise HTTPException(401, "Invalid token")
+
+    # Normalize folder path
+    normalized_folder = _normalize_folder_path(folder)
 
     temp_path = _get_temp_file_path(file.filename or "unknown")
     await _write_upload_to_temp(file, temp_path)
@@ -514,9 +602,13 @@ async def upload_file(
 
     if category == "image":
         file_size = os.path.getsize(temp_path)
-        variant_payload = await asyncio.to_thread(generate_image_variants, temp_path, file.filename or "image")
+        variant_payload = await asyncio.to_thread(
+            generate_image_variants, temp_path, file.filename or "image", normalized_folder
+        )
         _remove_file_if_exists(temp_path)
-        asset = await persist_asset_metadata(file.filename or "unknown", mime_type, file_size, variant_payload)
+        asset = await persist_asset_metadata(
+            file.filename or "unknown", mime_type, file_size, variant_payload, normalized_folder
+        )
         return JSONResponse(build_asset_payload(asset))
     else:
         # Handle non-image files (audio, video, pdf, etc.)
@@ -533,7 +625,13 @@ async def upload_file(
         
         base_name = f"{uuid.uuid4()}"
         unique_name = f"{base_name}.{extension}"
-        final_path = os.path.join(DIRS[category], unique_name)
+        
+        # Ensure folder directories exist
+        _ensure_folder_directories(category, normalized_folder)
+        
+        # Build final path with folder
+        base_dir = _get_folder_storage_path(DIRS[category], normalized_folder)
+        final_path = os.path.join(base_dir, unique_name)
         
         # Move file first, then extract metadata (some tools need the file in place)
         shutil.move(temp_path, final_path)
@@ -547,6 +645,7 @@ async def upload_file(
             base_name=base_name,
             extension=extension,
             file_path=final_path,
+            folder=normalized_folder,
         )
         
         return JSONResponse(build_asset_payload(asset))
@@ -563,25 +662,46 @@ async def get_asset_info(base_name: str = Path(..., description="Base name witho
 
 
 # FIXED: Raw image URLs now serve actual images (not JSON!)
-@app.get("/files/images/{variant}/{filename}")
+@app.get("/files/images/{variant}/{filename:path}")
 async def serve_image_file(variant: str, filename: str):
-    """Serve raw image files directly (for <img src="">, previews, etc.)"""
+    """Serve raw image files directly (for <img src="">, previews, etc.)
+    
+    Supports folder paths: /files/images/{variant}/{folder}/{filename}
+    or /files/images/{variant}/{filename}
+    """
     if variant not in IMAGE_VARIANT_SET:
         raise HTTPException(404, "Unknown variant")
 
-    file_path = os.path.join(DIRS["image"], variant, filename)
+    # Try to get asset from DB first to determine folder
+    base_name, _ = os.path.splitext(os.path.basename(filename))
+    asset = await get_asset_by_base_name(base_name)
+    
+    # Parse folder from filename path (filename might be "folder/subfolder/file.ext")
+    folder = None
+    if "/" in filename:
+        folder_part = os.path.dirname(filename)
+        if folder_part:
+            folder = folder_part
+    
+    # If we have asset, use its folder info
+    if asset and asset.folder and asset.folder.startswith("images/"):
+        folder_part = asset.folder[7:]  # Remove "images/" prefix
+        if folder_part:
+            folder = folder_part
+    
+    # Build file path
+    base_image_dir = _get_folder_storage_path(DIRS["image"], folder)
+    file_path = os.path.join(base_image_dir, variant, os.path.basename(filename))
+    
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found")
 
-    # Try to get MIME from DB for accuracy
-    base_name, _ = os.path.splitext(filename)
-    asset = await get_asset_by_base_name(base_name)
     media_type = asset.mime_type if asset else "application/octet-stream"
     
     # Handle high variant which might be .jpg
     if variant == "high" and not os.path.exists(file_path):
         high_filename = f"{base_name}.jpg"
-        file_path = os.path.join(DIRS["image"], variant, high_filename)
+        file_path = os.path.join(base_image_dir, variant, high_filename)
         if not os.path.exists(file_path):
             raise HTTPException(404, "File not found")
 

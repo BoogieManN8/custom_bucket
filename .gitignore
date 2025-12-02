@@ -2,6 +2,10 @@
 storage/
 uploads/
 
+# Test files
+test_image.png
+test.pdf
+.venv
 # Python
 __pycache__/
 *.py[cod]
